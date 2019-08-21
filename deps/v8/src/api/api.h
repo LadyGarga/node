@@ -90,6 +90,7 @@ class RegisteredExtension {
   V(Data, Object)                              \
   V(RegExp, JSRegExp)                          \
   V(Object, JSReceiver)                        \
+  V(FinalizationGroup, JSFinalizationGroup)    \
   V(Array, JSArray)                            \
   V(Map, JSMap)                                \
   V(Set, JSSet)                                \
@@ -198,6 +199,8 @@ class Utils {
       v8::internal::Handle<v8::internal::JSTypedArray> obj);
   static inline Local<BigUint64Array> ToLocalBigUint64Array(
       v8::internal::Handle<v8::internal::JSTypedArray> obj);
+  static inline Local<FinalizationGroup> ToLocal(
+      v8::internal::Handle<v8::internal::JSFinalizationGroup> obj);
 
   static inline Local<SharedArrayBuffer> ToLocalShared(
       v8::internal::Handle<v8::internal::JSArrayBuffer> obj);
@@ -248,9 +251,9 @@ class Utils {
   template <class From, class To>
   static inline Local<To> Convert(v8::internal::Handle<From> obj);
 
-  template <class T>
+  template <class T, class M>
   static inline v8::internal::Handle<v8::internal::Object> OpenPersistent(
-      const v8::Persistent<T>& persistent) {
+      const v8::Persistent<T, M>& persistent) {
     return v8::internal::Handle<v8::internal::Object>(
         reinterpret_cast<v8::internal::Address*>(persistent.val_));
   }

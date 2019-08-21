@@ -727,7 +727,8 @@ IGNITION_HANDLER(LdaModuleVariable, InterpreterAssembler) {
   Node* depth = BytecodeOperandUImm(1);
 
   Node* module_context = GetContextAtDepth(GetContext(), depth);
-  Node* module = LoadContextElement(module_context, Context::EXTENSION_INDEX);
+  TNode<SourceTextModule> module =
+      CAST(LoadContextElement(module_context, Context::EXTENSION_INDEX));
 
   Label if_export(this), if_import(this), end(this);
   Branch(IntPtrGreaterThan(cell_index, IntPtrConstant(0)), &if_export,
@@ -735,8 +736,8 @@ IGNITION_HANDLER(LdaModuleVariable, InterpreterAssembler) {
 
   BIND(&if_export);
   {
-    TNode<FixedArray> regular_exports =
-        CAST(LoadObjectField(module, SourceTextModule::kRegularExportsOffset));
+    TNode<FixedArray> regular_exports = LoadObjectField<FixedArray>(
+        module, SourceTextModule::kRegularExportsOffset);
     // The actual array index is (cell_index - 1).
     Node* export_index = IntPtrSub(cell_index, IntPtrConstant(1));
     Node* cell = LoadFixedArrayElement(regular_exports, export_index);
@@ -746,8 +747,8 @@ IGNITION_HANDLER(LdaModuleVariable, InterpreterAssembler) {
 
   BIND(&if_import);
   {
-    TNode<FixedArray> regular_imports =
-        CAST(LoadObjectField(module, SourceTextModule::kRegularImportsOffset));
+    TNode<FixedArray> regular_imports = LoadObjectField<FixedArray>(
+        module, SourceTextModule::kRegularImportsOffset);
     // The actual array index is (-cell_index - 1).
     Node* import_index = IntPtrSub(IntPtrConstant(-1), cell_index);
     Node* cell = LoadFixedArrayElement(regular_imports, import_index);
@@ -769,7 +770,8 @@ IGNITION_HANDLER(StaModuleVariable, InterpreterAssembler) {
   Node* depth = BytecodeOperandUImm(1);
 
   Node* module_context = GetContextAtDepth(GetContext(), depth);
-  Node* module = LoadContextElement(module_context, Context::EXTENSION_INDEX);
+  TNode<SourceTextModule> module =
+      CAST(LoadContextElement(module_context, Context::EXTENSION_INDEX));
 
   Label if_export(this), if_import(this), end(this);
   Branch(IntPtrGreaterThan(cell_index, IntPtrConstant(0)), &if_export,
@@ -777,8 +779,8 @@ IGNITION_HANDLER(StaModuleVariable, InterpreterAssembler) {
 
   BIND(&if_export);
   {
-    TNode<FixedArray> regular_exports =
-        CAST(LoadObjectField(module, SourceTextModule::kRegularExportsOffset));
+    TNode<FixedArray> regular_exports = LoadObjectField<FixedArray>(
+        module, SourceTextModule::kRegularExportsOffset);
     // The actual array index is (cell_index - 1).
     Node* export_index = IntPtrSub(cell_index, IntPtrConstant(1));
     Node* cell = LoadFixedArrayElement(regular_exports, export_index);
@@ -2288,6 +2290,41 @@ IGNITION_HANDLER(JumpIfNotUndefinedConstant, InterpreterAssembler) {
   JumpIfWordNotEqual(accumulator, UndefinedConstant(), relative_jump);
 }
 
+// JumpIfUndefinedOrNull <imm>
+//
+// Jump by the number of bytes represented by an immediate operand if the object
+// referenced by the accumulator is the undefined constant or the null constant.
+IGNITION_HANDLER(JumpIfUndefinedOrNull, InterpreterAssembler) {
+  Node* accumulator = GetAccumulator();
+
+  Label do_jump(this);
+  GotoIf(IsUndefined(accumulator), &do_jump);
+  GotoIf(IsNull(accumulator), &do_jump);
+  Dispatch();
+
+  BIND(&do_jump);
+  Node* relative_jump = BytecodeOperandUImmWord(0);
+  Jump(relative_jump);
+}
+
+// JumpIfUndefinedOrNullConstant <idx>
+//
+// Jump by the number of bytes in the Smi in the |idx| entry in the constant
+// pool if the object referenced by the accumulator is the undefined constant or
+// the null constant.
+IGNITION_HANDLER(JumpIfUndefinedOrNullConstant, InterpreterAssembler) {
+  Node* accumulator = GetAccumulator();
+
+  Label do_jump(this);
+  GotoIf(IsUndefined(accumulator), &do_jump);
+  GotoIf(IsNull(accumulator), &do_jump);
+  Dispatch();
+
+  BIND(&do_jump);
+  Node* relative_jump = LoadAndUntagConstantPoolEntryAtOperandIndex(0);
+  Jump(relative_jump);
+}
+
 // JumpIfJSReceiver <imm>
 //
 // Jump by the number of bytes represented by an immediate operand if the object
@@ -2601,9 +2638,10 @@ IGNITION_HANDLER(GetTemplateObject, InterpreterAssembler) {
   {
     Node* description = LoadConstantPoolEntryAtOperandIndex(0);
     Node* slot_smi = SmiTag(slot);
-    Node* closure = LoadRegister(Register::function_closure());
-    Node* shared_info =
-        LoadObjectField(closure, JSFunction::kSharedFunctionInfoOffset);
+    TNode<JSFunction> closure =
+        CAST(LoadRegister(Register::function_closure()));
+    TNode<SharedFunctionInfo> shared_info = LoadObjectField<SharedFunctionInfo>(
+        closure, JSFunction::kSharedFunctionInfoOffset);
     Node* context = GetContext();
     Node* result = CallRuntime(Runtime::kGetTemplateObject, context,
                                description, shared_info, slot_smi);
@@ -2739,7 +2777,7 @@ IGNITION_HANDLER(CreateWithContext, InterpreterAssembler) {
 //
 // Creates a new mapped arguments object.
 IGNITION_HANDLER(CreateMappedArguments, InterpreterAssembler) {
-  Node* closure = LoadRegister(Register::function_closure());
+  TNode<JSFunction> closure = CAST(LoadRegister(Register::function_closure()));
   Node* context = GetContext();
 
   Label if_duplicate_parameters(this, Label::kDeferred);
@@ -2748,8 +2786,8 @@ IGNITION_HANDLER(CreateMappedArguments, InterpreterAssembler) {
   // Check if function has duplicate parameters.
   // TODO(rmcilroy): Remove this check when FastNewSloppyArgumentsStub supports
   // duplicate parameters.
-  Node* shared_info =
-      LoadObjectField(closure, JSFunction::kSharedFunctionInfoOffset);
+  TNode<SharedFunctionInfo> shared_info = LoadObjectField<SharedFunctionInfo>(
+      closure, JSFunction::kSharedFunctionInfoOffset);
   Node* flags = LoadObjectField(shared_info, SharedFunctionInfo::kFlagsOffset,
                                 MachineType::Uint32());
   Node* has_duplicate_parameters =
@@ -3022,13 +3060,15 @@ IGNITION_HANDLER(ForInPrepare, InterpreterAssembler) {
     Node* enum_length = LoadMapEnumLength(enumerator);
     CSA_ASSERT(this, WordNotEqual(enum_length,
                                   IntPtrConstant(kInvalidEnumCacheSentinel)));
-    Node* descriptors = LoadMapDescriptors(enumerator);
-    Node* enum_cache =
-        LoadObjectField(descriptors, DescriptorArray::kEnumCacheOffset);
-    Node* enum_keys = LoadObjectField(enum_cache, EnumCache::kKeysOffset);
+    TNode<DescriptorArray> descriptors = LoadMapDescriptors(enumerator);
+    TNode<EnumCache> enum_cache = LoadObjectField<EnumCache>(
+        descriptors, DescriptorArray::kEnumCacheOffset);
+    TNode<FixedArray> enum_keys =
+        LoadObjectField<FixedArray>(enum_cache, EnumCache::kKeysOffset);
 
     // Check if we have enum indices available.
-    Node* enum_indices = LoadObjectField(enum_cache, EnumCache::kIndicesOffset);
+    TNode<FixedArray> enum_indices =
+        LoadObjectField<FixedArray>(enum_cache, EnumCache::kIndicesOffset);
     Node* enum_indices_length = LoadAndUntagFixedArrayBaseLength(enum_indices);
     Node* feedback = SelectSmiConstant(
         IntPtrLessThanOrEqual(enum_length, enum_indices_length),
@@ -3133,6 +3173,25 @@ IGNITION_HANDLER(ForInStep, InterpreterAssembler) {
   TNode<Smi> index = CAST(LoadRegisterAtOperandIndex(0));
   TNode<Smi> one = SmiConstant(1);
   TNode<Smi> result = SmiAdd(index, one);
+  SetAccumulator(result);
+  Dispatch();
+}
+
+// GetIterator <object>
+//
+// Retrieves the object[Symbol.iterator] method and stores the result
+// in the accumulator
+// TODO(swapnilgaikwad): Extend the functionality of the bytecode to call
+// iterator method for an object
+IGNITION_HANDLER(GetIterator, InterpreterAssembler) {
+  Node* receiver = LoadRegisterAtOperandIndex(0);
+  Node* context = GetContext();
+  Node* feedback_vector = LoadFeedbackVector();
+  Node* feedback_slot = BytecodeOperandIdx(1);
+  Node* smi_slot = SmiTag(feedback_slot);
+
+  Node* result = CallBuiltin(Builtins::kGetIteratorWithFeedback, context,
+                             receiver, smi_slot, feedback_vector);
   SetAccumulator(result);
   Dispatch();
 }

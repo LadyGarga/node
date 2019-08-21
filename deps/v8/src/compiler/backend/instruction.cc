@@ -1018,6 +1018,28 @@ FrameStateDescriptor::FrameStateDescriptor(
       shared_info_(shared_info),
       outer_state_(outer_state) {}
 
+size_t FrameStateDescriptor::GetHeight() const {
+  switch (type()) {
+    case FrameStateType::kInterpretedFunction:
+      return locals_count();  // The accumulator is *not* included.
+    case FrameStateType::kBuiltinContinuation:
+      // Custom, non-JS calling convention (that does not have a notion of
+      // a receiver or context).
+      return parameters_count();
+    case FrameStateType::kArgumentsAdaptor:
+    case FrameStateType::kConstructStub:
+    case FrameStateType::kJavaScriptBuiltinContinuation:
+    case FrameStateType::kJavaScriptBuiltinContinuationWithCatch:
+      // JS linkage. The parameters count
+      // - includes the receiver (input 1 in CreateArtificialFrameState, and
+      //   passed as part of stack parameters to
+      //   CreateJavaScriptBuiltinContinuationFrameState), and
+      // - does *not* include the context.
+      return parameters_count();
+  }
+  UNREACHABLE();
+}
+
 size_t FrameStateDescriptor::GetSize() const {
   return 1 + parameters_count() + locals_count() + stack_count() +
          (HasContext() ? 1 : 0);

@@ -154,12 +154,21 @@ void Sweeper::StartSweeping() {
   MajorNonAtomicMarkingState* marking_state =
       heap_->mark_compact_collector()->non_atomic_marking_state();
   ForAllSweepingSpaces([this, marking_state](AllocationSpace space) {
-    int space_index = GetSweepSpaceIndex(space);
-    std::sort(
-        sweeping_list_[space_index].begin(), sweeping_list_[space_index].end(),
-        [marking_state](Page* a, Page* b) {
-          return marking_state->live_bytes(a) > marking_state->live_bytes(b);
-        });
+    // Sorting is done in order to make compaction more efficient: by sweeping
+    // pages with the most free bytes first, we make it more likely that when
+    // evacuating a page, already swept pages will have enough free bytes to
+    // hold the objects to move (and therefore, we won't need to wait for more
+    // pages to be swept in order to move those objects).
+    // Since maps don't move, there is no need to sort the pages from MAP_SPACE
+    // before sweeping them.
+    if (space != MAP_SPACE) {
+      int space_index = GetSweepSpaceIndex(space);
+      std::sort(
+          sweeping_list_[space_index].begin(),
+          sweeping_list_[space_index].end(), [marking_state](Page* a, Page* b) {
+            return marking_state->live_bytes(a) > marking_state->live_bytes(b);
+          });
+    }
   });
 }
 
@@ -296,7 +305,7 @@ int Sweeper::RawSweep(Page* p, FreeListRebuildingMode free_list_mode,
         max_freed_bytes = Max(freed_bytes, max_freed_bytes);
       } else {
         p->heap()->CreateFillerObjectAt(
-            free_start, static_cast<int>(size), ClearRecordedSlots::kNo,
+            free_start, static_cast<int>(size),
             ClearFreedMemoryMode::kClearFreedMemory);
       }
       if (should_reduce_memory_) p->DiscardUnusedMemory(free_start, size);
@@ -328,7 +337,6 @@ int Sweeper::RawSweep(Page* p, FreeListRebuildingMode free_list_mode,
       max_freed_bytes = Max(freed_bytes, max_freed_bytes);
     } else {
       p->heap()->CreateFillerObjectAt(free_start, static_cast<int>(size),
-                                      ClearRecordedSlots::kNo,
                                       ClearFreedMemoryMode::kClearFreedMemory);
     }
     if (should_reduce_memory_) p->DiscardUnusedMemory(free_start, size);

@@ -259,8 +259,8 @@ void AccessorAssembler::HandleLoadField(Node* holder, Node* handler_word,
       var_double_value->Bind(
           LoadObjectField(holder, offset, MachineType::Float64()));
     } else {
-      Node* mutable_heap_number = LoadObjectField(holder, offset);
-      var_double_value->Bind(LoadHeapNumberValue(mutable_heap_number));
+      Node* heap_number = LoadObjectField(holder, offset);
+      var_double_value->Bind(LoadHeapNumberValue(heap_number));
     }
     Goto(rebox_double);
   }
@@ -302,7 +302,10 @@ void AccessorAssembler::HandleLoadICSmiHandlerCase(
   TNode<IntPtrT> handler_kind =
       Signed(DecodeWord<LoadHandler::KindBits>(handler_word));
   if (support_elements == kSupportElements) {
-    Label if_element(this), if_indexed_string(this), if_property(this);
+    TVARIABLE(IntPtrT, var_intptr_index);
+    Label if_element(this), if_indexed_string(this), if_property(this),
+        if_hole(this), unimplemented_elements_kind(this),
+        if_oob(this, Label::kDeferred);
     GotoIf(WordEqual(handler_kind, IntPtrConstant(LoadHandler::kElement)),
            &if_element);
 
@@ -318,18 +321,18 @@ void AccessorAssembler::HandleLoadICSmiHandlerCase(
     }
 
     BIND(&if_element);
-    Comment("element_load");
-    Node* intptr_index = TryToIntptr(p->name(), miss);
-    Node* is_jsarray_condition =
-        IsSetWord<LoadHandler::IsJsArrayBits>(handler_word);
-    Node* elements_kind =
-        DecodeWord32FromWord<LoadHandler::ElementsKindBits>(handler_word);
-    Label if_hole(this), unimplemented_elements_kind(this),
-        if_oob(this, Label::kDeferred);
-    EmitElementLoad(holder, elements_kind, intptr_index, is_jsarray_condition,
-                    &if_hole, &rebox_double, &var_double_value,
-                    &unimplemented_elements_kind, &if_oob, miss, exit_point,
-                    access_mode);
+    {
+      Comment("element_load");
+      var_intptr_index = TryToIntptr(p->name(), miss);
+      Node* is_jsarray_condition =
+          IsSetWord<LoadHandler::IsJsArrayBits>(handler_word);
+      Node* elements_kind =
+          DecodeWord32FromWord<LoadHandler::ElementsKindBits>(handler_word);
+      EmitElementLoad(holder, elements_kind, var_intptr_index.value(),
+                      is_jsarray_condition, &if_hole, &rebox_double,
+                      &var_double_value, &unimplemented_elements_kind, &if_oob,
+                      miss, exit_point, access_mode);
+    }
 
     BIND(&unimplemented_elements_kind);
     {
@@ -355,7 +358,7 @@ void AccessorAssembler::HandleLoadICSmiHandlerCase(
       // in case of typed arrays, where integer indexed properties
       // aren't looked up in the prototype chain.
       GotoIf(IsJSTypedArray(holder), &return_undefined);
-      GotoIf(IntPtrLessThan(intptr_index, IntPtrConstant(0)), miss);
+      GotoIf(IntPtrLessThan(var_intptr_index.value(), IntPtrConstant(0)), miss);
 
       // For all other receivers we need to check that the prototype chain
       // doesn't contain any elements.
@@ -1114,12 +1117,7 @@ void AccessorAssembler::CheckFieldType(TNode<DescriptorArray> descriptors,
   BIND(&r_double);
   {
     GotoIf(TaggedIsSmi(value), &all_fine);
-    Node* value_map = LoadMap(value);
-    // While supporting mutable HeapNumbers would be straightforward, such
-    // objects should not end up here anyway.
-    CSA_ASSERT(this, WordNotEqual(value_map,
-                                  LoadRoot(RootIndex::kMutableHeapNumberMap)));
-    Branch(IsHeapNumberMap(value_map), &all_fine, bailout);
+    Branch(IsHeapNumber(value), &all_fine, bailout);
   }
 
   BIND(&r_heapobject);
@@ -1212,19 +1210,17 @@ void AccessorAssembler::OverwriteExistingFastDataProperty(
                                          MachineRepresentation::kFloat64);
         } else {
           if (do_transitioning_store) {
-            Node* mutable_heap_number =
-                AllocateMutableHeapNumberWithValue(double_value);
+            Node* heap_number = AllocateHeapNumberWithValue(double_value);
             StoreMap(object, object_map);
-            StoreObjectField(object, field_offset, mutable_heap_number);
+            StoreObjectField(object, field_offset, heap_number);
           } else {
-            Node* mutable_heap_number = LoadObjectField(object, field_offset);
+            Node* heap_number = LoadObjectField(object, field_offset);
             Label if_mutable(this);
             GotoIfNot(IsPropertyDetailsConst(details), &if_mutable);
-            TNode<Float64T> current_value =
-                LoadHeapNumberValue(mutable_heap_number);
+            TNode<Float64T> current_value = LoadHeapNumberValue(heap_number);
             BranchIfSameNumberValue(current_value, double_value, &done, slow);
             BIND(&if_mutable);
-            StoreHeapNumberValue(mutable_heap_number, double_value);
+            StoreHeapNumberValue(heap_number, double_value);
           }
         }
         Goto(&done);
@@ -1265,9 +1261,8 @@ void AccessorAssembler::OverwriteExistingFastDataProperty(
                  &cont);
           {
             Node* double_value = ChangeNumberToFloat64(CAST(value));
-            Node* mutable_heap_number =
-                AllocateMutableHeapNumberWithValue(double_value);
-            var_value.Bind(mutable_heap_number);
+            Node* heap_number = AllocateHeapNumberWithValue(double_value);
+            var_value.Bind(heap_number);
             Goto(&cont);
           }
           BIND(&cont);
@@ -1288,18 +1283,17 @@ void AccessorAssembler::OverwriteExistingFastDataProperty(
             &double_rep, &tagged_rep);
         BIND(&double_rep);
         {
-          Node* mutable_heap_number =
+          Node* heap_number =
               LoadPropertyArrayElement(properties, backing_store_index);
           TNode<Float64T> double_value = ChangeNumberToFloat64(CAST(value));
 
           Label if_mutable(this);
           GotoIfNot(IsPropertyDetailsConst(details), &if_mutable);
-          TNode<Float64T> current_value =
-              LoadHeapNumberValue(mutable_heap_number);
+          TNode<Float64T> current_value = LoadHeapNumberValue(heap_number);
           BranchIfSameNumberValue(current_value, double_value, &done, slow);
 
           BIND(&if_mutable);
-          StoreHeapNumberValue(mutable_heap_number, double_value);
+          StoreHeapNumberValue(heap_number, double_value);
           Goto(&done);
         }
         BIND(&tagged_rep);
@@ -2298,10 +2292,10 @@ void AccessorAssembler::GenericPropertyLoad(Node* receiver, Node* receiver_map,
       GotoIf(InstanceTypeEqual(var_holder_instance_type.value(),
                                JS_TYPED_ARRAY_TYPE),
              slow);
-      Node* proto = LoadMapPrototype(var_holder_map.value());
+      TNode<HeapObject> proto = LoadMapPrototype(var_holder_map.value());
       GotoIf(WordEqual(proto, NullConstant()), &return_undefined);
-      Node* proto_map = LoadMap(proto);
-      Node* proto_instance_type = LoadMapInstanceType(proto_map);
+      TNode<Map> proto_map = LoadMap(proto);
+      TNode<Uint16T> proto_instance_type = LoadMapInstanceType(proto_map);
       var_holder_map.Bind(proto_map);
       var_holder_instance_type.Bind(proto_instance_type);
       Label next_proto(this), return_value(this, &var_value), goto_slow(this);
@@ -2524,8 +2518,8 @@ void AccessorAssembler::LoadIC_BytecodeHandler(const LazyLoadICParameters* p,
     Comment("LoadIC_BytecodeHandler_nofeedback");
     // Call into the stub that implements the non-inlined parts of LoadIC.
     exit_point->ReturnCallStub(
-        Builtins::CallableFor(isolate(), Builtins::kLoadIC_Uninitialized),
-        p->context(), p->receiver(), p->name(), p->slot(), p->vector());
+        Builtins::CallableFor(isolate(), Builtins::kLoadIC_NoFeedback),
+        p->context(), p->receiver(), p->name(), p->slot());
   }
 
   BIND(&miss);
@@ -2589,8 +2583,6 @@ void AccessorAssembler::LoadIC_Noninlined(const LoadICParameters* p,
                                           TVariable<MaybeObject>* var_handler,
                                           Label* if_handler, Label* miss,
                                           ExitPoint* exit_point) {
-  Label try_uninitialized(this, Label::kDeferred);
-
   // Neither deprecated map nor monomorphic. These cases are handled in the
   // bytecode handler.
   CSA_ASSERT(this, Word32BinaryNot(IsDeprecatedMap(receiver_map)));
@@ -2601,41 +2593,20 @@ void AccessorAssembler::LoadIC_Noninlined(const LoadICParameters* p,
   {
     // Check megamorphic case.
     GotoIfNot(WordEqual(feedback, LoadRoot(RootIndex::kmegamorphic_symbol)),
-              &try_uninitialized);
+              miss);
 
     TryProbeStubCache(isolate()->load_stub_cache(), p->receiver(), p->name(),
                       if_handler, var_handler, miss);
   }
-
-  BIND(&try_uninitialized);
-  {
-    // Check uninitialized case.
-    GotoIfNot(WordEqual(feedback, LoadRoot(RootIndex::kuninitialized_symbol)),
-              miss);
-    exit_point->ReturnCallStub(
-        Builtins::CallableFor(isolate(), Builtins::kLoadIC_Uninitialized),
-        p->context(), p->receiver(), p->name(), p->slot(), p->vector());
-  }
 }
 
-void AccessorAssembler::LoadIC_Uninitialized(const LoadICParameters* p) {
-  Label miss(this, Label::kDeferred),
-      check_function_prototype(this);
+void AccessorAssembler::LoadIC_NoFeedback(const LoadICParameters* p) {
+  Label miss(this, Label::kDeferred);
   Node* receiver = p->receiver();
   GotoIf(TaggedIsSmi(receiver), &miss);
   Node* receiver_map = LoadMap(receiver);
   Node* instance_type = LoadMapInstanceType(receiver_map);
 
-  GotoIf(IsUndefined(p->vector()), &check_function_prototype);
-  // Optimistically write the state transition to the vector.
-  StoreFeedbackVectorSlot(p->vector(), p->slot(),
-                          LoadRoot(RootIndex::kpremonomorphic_symbol),
-                          SKIP_WRITE_BARRIER, 0, SMI_PARAMETERS);
-  StoreWeakReferenceInFeedbackVector(p->vector(), p->slot(), receiver_map,
-                                     kTaggedSize, SMI_PARAMETERS);
-  Goto(&check_function_prototype);
-
-  BIND(&check_function_prototype);
   {
     // Special case for Function.prototype load, because it's very common
     // for ICs that are only executed once (MyFunc.prototype.foo = ...).
@@ -2646,7 +2617,7 @@ void AccessorAssembler::LoadIC_Uninitialized(const LoadICParameters* p) {
 
     GotoIfPrototypeRequiresRuntimeLookup(CAST(receiver), CAST(receiver_map),
                                          &not_function_prototype);
-    Return(LoadJSFunctionPrototype(receiver, &miss));
+    Return(LoadJSFunctionPrototype(CAST(receiver), &miss));
     BIND(&not_function_prototype);
   }
 
@@ -2655,15 +2626,6 @@ void AccessorAssembler::LoadIC_Uninitialized(const LoadICParameters* p) {
 
   BIND(&miss);
   {
-    Label call_runtime(this, Label::kDeferred);
-    GotoIf(IsUndefined(p->vector()), &call_runtime);
-    // Undo the optimistic state transition.
-    StoreFeedbackVectorSlot(p->vector(), p->slot(),
-                            LoadRoot(RootIndex::kuninitialized_symbol),
-                            SKIP_WRITE_BARRIER, 0, SMI_PARAMETERS);
-    Goto(&call_runtime);
-
-    BIND(&call_runtime);
     TailCallRuntime(Runtime::kLoadIC_Miss, p->context(), p->receiver(),
                     p->name(), p->slot(), p->vector());
   }
@@ -2772,6 +2734,7 @@ void AccessorAssembler::KeyedLoadIC(const LoadICParameters* p,
   TVARIABLE(MaybeObject, var_handler);
   Label if_handler(this, &var_handler), try_polymorphic(this, Label::kDeferred),
       try_megamorphic(this, Label::kDeferred),
+      try_uninitialized(this, Label::kDeferred),
       try_polymorphic_name(this, Label::kDeferred),
       miss(this, Label::kDeferred), generic(this, Label::kDeferred);
 
@@ -2808,7 +2771,7 @@ void AccessorAssembler::KeyedLoadIC(const LoadICParameters* p,
     // Check megamorphic case.
     Comment("KeyedLoadIC_try_megamorphic");
     Branch(WordEqual(strong_feedback, LoadRoot(RootIndex::kmegamorphic_symbol)),
-           &generic, &try_polymorphic_name);
+           &generic, &try_uninitialized);
   }
 
   BIND(&generic);
@@ -2819,6 +2782,15 @@ void AccessorAssembler::KeyedLoadIC(const LoadICParameters* p,
                         : Builtins::kKeyedHasIC_Megamorphic,
                     p->context(), p->receiver(), p->name(), p->slot(),
                     p->vector());
+  }
+
+  BIND(&try_uninitialized);
+  {
+    // Check uninitialized case.
+    Comment("KeyedLoadIC_try_uninitialized");
+    Branch(
+        WordEqual(strong_feedback, LoadRoot(RootIndex::kuninitialized_symbol)),
+        &miss, &try_polymorphic_name);
   }
 
   BIND(&try_polymorphic_name);
@@ -3014,8 +2986,7 @@ void AccessorAssembler::StoreIC(const StoreICParameters* p) {
   Label if_handler(this, &var_handler),
       if_handler_from_stub_cache(this, &var_handler, Label::kDeferred),
       try_polymorphic(this, Label::kDeferred),
-      try_megamorphic(this, Label::kDeferred),
-      try_uninitialized(this, Label::kDeferred), miss(this, Label::kDeferred),
+      try_megamorphic(this, Label::kDeferred), miss(this, Label::kDeferred),
       no_feedback(this, Label::kDeferred);
 
   Node* receiver_map = LoadReceiverMap(p->receiver());
@@ -3049,24 +3020,16 @@ void AccessorAssembler::StoreIC(const StoreICParameters* p) {
     // Check megamorphic case.
     GotoIfNot(
         WordEqual(strong_feedback, LoadRoot(RootIndex::kmegamorphic_symbol)),
-        &try_uninitialized);
+        &miss);
 
     TryProbeStubCache(isolate()->store_stub_cache(), p->receiver(), p->name(),
                       &if_handler, &var_handler, &miss);
   }
-  BIND(&try_uninitialized);
-  {
-    // Check uninitialized case.
-    Branch(
-        WordEqual(strong_feedback, LoadRoot(RootIndex::kuninitialized_symbol)),
-        &no_feedback, &miss);
-  }
 
   BIND(&no_feedback);
   {
-    TailCallBuiltin(Builtins::kStoreIC_Uninitialized, p->context(),
-                    p->receiver(), p->name(), p->value(), p->slot(),
-                    p->vector());
+    TailCallBuiltin(Builtins::kStoreIC_NoFeedback, p->context(), p->receiver(),
+                    p->name(), p->value(), p->slot());
   }
 
   BIND(&miss);
@@ -3085,6 +3048,10 @@ void AccessorAssembler::StoreGlobalIC(const StoreICParameters* pp) {
   BIND(&if_heapobject);
   {
     Label try_handler(this), miss(this, Label::kDeferred);
+    // We use pre-monomorphic state for global stores that run into
+    // interceptors because the property doesn't exist yet. Using
+    // pre-monomorphic state gives it a chance to find more information the
+    // second time.
     GotoIf(
         WordEqual(maybe_weak_ref, LoadRoot(RootIndex::kpremonomorphic_symbol)),
         &miss);
@@ -3432,17 +3399,16 @@ void AccessorAssembler::GenerateLoadIC_Noninlined() {
                                 slot, vector);
 }
 
-void AccessorAssembler::GenerateLoadIC_Uninitialized() {
-  using Descriptor = LoadWithVectorDescriptor;
+void AccessorAssembler::GenerateLoadIC_NoFeedback() {
+  using Descriptor = LoadDescriptor;
 
   Node* receiver = Parameter(Descriptor::kReceiver);
   Node* name = Parameter(Descriptor::kName);
   Node* slot = Parameter(Descriptor::kSlot);
-  Node* vector = Parameter(Descriptor::kVector);
   TNode<Context> context = CAST(Parameter(Descriptor::kContext));
 
-  LoadICParameters p(context, receiver, name, slot, vector);
-  LoadIC_Uninitialized(&p);
+  LoadICParameters p(context, receiver, name, slot, UndefinedConstant());
+  LoadIC_NoFeedback(&p);
 }
 
 void AccessorAssembler::GenerateLoadICTrampoline() {
@@ -3798,8 +3764,8 @@ void AccessorAssembler::GenerateCloneObjectIC() {
     TNode<IntPtrT> field_offset_difference =
         TimesTaggedSize(IntPtrSub(result_start, source_start));
 
-    // Just copy the fields as raw data (pretending that there are no
-    // MutableHeapNumbers). This doesn't need write barriers.
+    // Just copy the fields as raw data (pretending that there are no mutable
+    // HeapNumbers). This doesn't need write barriers.
     BuildFastLoop(
         source_start, source_size,
         [=](Node* field_index) {
@@ -3813,7 +3779,7 @@ void AccessorAssembler::GenerateCloneObjectIC() {
         },
         1, INTPTR_PARAMETERS, IndexAdvanceMode::kPost);
 
-    // If MutableHeapNumbers can occur, we need to go through the {object}
+    // If mutable HeapNumbers can occur, we need to go through the {object}
     // again here and properly clone them. We use a second loop here to
     // ensure that the GC (and heap verifier) always sees properly initialized
     // objects, i.e. never hits undefined values in double fields.
@@ -3827,11 +3793,10 @@ void AccessorAssembler::GenerateCloneObjectIC() {
             TNode<Object> field = LoadObjectField(object, result_offset);
             Label if_done(this), if_mutableheapnumber(this, Label::kDeferred);
             GotoIf(TaggedIsSmi(field), &if_done);
-            Branch(IsMutableHeapNumber(CAST(field)), &if_mutableheapnumber,
-                   &if_done);
+            Branch(IsHeapNumber(CAST(field)), &if_mutableheapnumber, &if_done);
             BIND(&if_mutableheapnumber);
             {
-              TNode<Object> value = AllocateMutableHeapNumberWithValue(
+              TNode<Object> value = AllocateHeapNumberWithValue(
                   LoadHeapNumberValue(UncheckedCast<HeapNumber>(field)));
               StoreObjectField(object, result_offset, value);
               Goto(&if_done);

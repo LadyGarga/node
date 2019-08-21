@@ -68,7 +68,6 @@ enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
   V(ManyClosuresCellMap, many_closures_cell_map, ManyClosuresCellMap)          \
   V(MetaMap, meta_map, MetaMap)                                                \
   V(MinusZeroValue, minus_zero_value, MinusZero)                               \
-  V(MutableHeapNumberMap, mutable_heap_number_map, MutableHeapNumberMap)       \
   V(NanValue, nan_value, Nan)                                                  \
   V(NoClosuresCellMap, no_closures_cell_map, NoClosuresCellMap)                \
   V(NullValue, null_value, Null)                                               \
@@ -119,18 +118,17 @@ enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
 #define CSA_ASSERT_2_ARGS(a, b, ...) {{a, #a}, {b, #b}}
 // clang-format on
 #define SWITCH_CSA_ASSERT_ARGS(dummy, a, b, FUNC, ...) FUNC(a, b)
-#define CSA_ASSERT_ARGS(...)                                      \
-  SWITCH_CSA_ASSERT_ARGS(dummy, ##__VA_ARGS__, CSA_ASSERT_2_ARGS, \
-                         CSA_ASSERT_1_ARG, CSA_ASSERT_0_ARGS)
+#define CSA_ASSERT_ARGS(...)                                        \
+  CALL(SWITCH_CSA_ASSERT_ARGS, (, ##__VA_ARGS__, CSA_ASSERT_2_ARGS, \
+                                CSA_ASSERT_1_ARG, CSA_ASSERT_0_ARGS))
+// Workaround for MSVC to skip comma in empty __VA_ARGS__.
+#define CALL(x, y) x y
 
 // CSA_ASSERT(csa, <condition>, <extra values to print...>)
 
-#define CSA_ASSERT(csa, condition_node, ...)                                  \
-  (csa)->Assert(                                                              \
-      [&]() -> compiler::Node* {                                              \
-        return implicit_cast<compiler::SloppyTNode<Word32T>>(condition_node); \
-      },                                                                      \
-      #condition_node, __FILE__, __LINE__, CSA_ASSERT_ARGS(__VA_ARGS__))
+#define CSA_ASSERT(csa, condition_node, ...)                         \
+  (csa)->Assert(condition_node, #condition_node, __FILE__, __LINE__, \
+                CSA_ASSERT_ARGS(__VA_ARGS__))
 
 // CSA_ASSERT_BRANCH(csa, [](Label* ok, Label* not_ok) {...},
 //     <extra values to print...>)
@@ -222,7 +220,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   // fewer live ranges. Thus only convert indices to untagged value on 64-bit
   // platforms.
   ParameterMode OptimalParameterMode() const {
-    return Is64() ? INTPTR_PARAMETERS : SMI_PARAMETERS;
+    return !COMPRESS_POINTERS_BOOL && Is64() ? INTPTR_PARAMETERS
+                                             : SMI_PARAMETERS;
   }
 
   MachineRepresentation ParameterRepresentation(ParameterMode mode) const {
@@ -268,7 +267,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
     } else {
       DCHECK_EQ(mode, ParameterMode::INTPTR_PARAMETERS);
       intptr_t constant;
-      if (ToIntPtrConstant(node, constant)) {
+      if (ToIntPtrConstant(node, &constant)) {
         *out = constant;
         return true;
       }
@@ -277,7 +276,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
     return false;
   }
 
-#if defined(V8_HOST_ARCH_32_BIT)
+#if defined(V8_HOST_ARCH_32_BIT) || defined(V8_COMPRESS_POINTERS)
   TNode<Smi> BIntToSmi(TNode<BInt> source) { return source; }
   TNode<IntPtrT> BIntToIntPtr(TNode<BInt> source) {
     return SmiToIntPtr(source);
@@ -620,10 +619,16 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   void Assert(const NodeGenerator& condition_body, const char* message,
               const char* file, int line,
               std::initializer_list<ExtraNode> extra_nodes = {});
+  void Assert(SloppyTNode<Word32T> condition_node, const char* message,
+              const char* file, int line,
+              std::initializer_list<ExtraNode> extra_nodes = {});
   void Check(const BranchGenerator& branch, const char* message,
              const char* file, int line,
              std::initializer_list<ExtraNode> extra_nodes = {});
   void Check(const NodeGenerator& condition_body, const char* message,
+             const char* file, int line,
+             std::initializer_list<ExtraNode> extra_nodes = {});
+  void Check(SloppyTNode<Word32T> condition_node, const char* message,
              const char* file, int line,
              std::initializer_list<ExtraNode> extra_nodes = {});
   void FailAssert(const char* message, const char* file, int line,
@@ -847,6 +852,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   // Reference is the CSA-equivalent of a Torque reference value,
   // representing an inner pointer into a HeapObject.
+  // TODO(gsps): Remove in favor of flattened {Load,Store}Reference interface
   struct Reference {
     TNode<HeapObject> object;
     TNode<IntPtrT> offset;
@@ -915,6 +921,10 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                       InstanceType type);
   TNode<BoolT> TaggedDoesntHaveInstanceType(SloppyTNode<HeapObject> any_tagged,
                                             InstanceType type);
+
+  TNode<Word32T> IsStringWrapperElementsKind(TNode<Map> map);
+  void GotoIfMapHasSlowProperties(TNode<Map> map, Label* if_slow);
+
   // Load the properties backing store of a JSObject.
   TNode<HeapObject> LoadSlowProperties(SloppyTNode<JSObject> object);
   TNode<HeapObject> LoadFastProperties(SloppyTNode<JSObject> object);
@@ -940,6 +950,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
       SloppyTNode<WeakFixedArray> array);
   // Load the number of descriptors in DescriptorArray.
   TNode<Int32T> LoadNumberOfDescriptors(TNode<DescriptorArray> array);
+  // Load the number of own descriptors of a map.
+  TNode<Int32T> LoadNumberOfOwnDescriptors(TNode<Map> map);
   // Load the bit field of a Map.
   TNode<Int32T> LoadMapBitField(SloppyTNode<Map> map);
   // Load bit field 2 of a map.
@@ -1176,9 +1188,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                        SMI_PARAMETERS, if_hole);
   }
 
-  Node* LoadFixedDoubleArrayElement(TNode<FixedDoubleArray> object,
-                                    TNode<IntPtrT> index,
-                                    Label* if_hole = nullptr) {
+  TNode<Float64T> LoadFixedDoubleArrayElement(TNode<FixedDoubleArray> object,
+                                              TNode<IntPtrT> index,
+                                              Label* if_hole = nullptr) {
     return LoadFixedDoubleArrayElement(object, index, MachineType::Float64(), 0,
                                        INTPTR_PARAMETERS, if_hole);
   }
@@ -1277,7 +1289,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   void GotoIfPrototypeRequiresRuntimeLookup(TNode<JSFunction> function,
                                             TNode<Map> map, Label* runtime);
   // Load the "prototype" property of a JSFunction.
-  Node* LoadJSFunctionPrototype(Node* function, Label* if_bailout);
+  Node* LoadJSFunctionPrototype(TNode<JSFunction> function, Label* if_bailout);
 
   TNode<BytecodeArray> LoadSharedFunctionInfoBytecodeArray(
       SloppyTNode<SharedFunctionInfo> shared);
@@ -1288,8 +1300,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   // Store the floating point value of a HeapNumber.
   void StoreHeapNumberValue(SloppyTNode<HeapNumber> object,
                             SloppyTNode<Float64T> value);
-  void StoreMutableHeapNumberValue(SloppyTNode<MutableHeapNumber> object,
-                                   SloppyTNode<Float64T> value);
   // Store a field to an object on the heap.
   void StoreObjectField(Node* object, int offset, Node* value);
   void StoreObjectField(Node* object, Node* offset, Node* value);
@@ -1359,9 +1369,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
     return StoreFixedArrayElement(object, index, value,
                                   CheckBounds::kDebugOnly);
   }
-
-  void StoreJSArrayLength(TNode<JSArray> array, TNode<Smi> length);
-  void StoreElements(TNode<Object> object, TNode<FixedArrayBase> elements);
 
   void StoreFixedArrayOrPropertyArrayElement(
       Node* array, Node* index, Node* value,
@@ -1511,10 +1518,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
     return AllocateHeapNumberWithValue(Float64Constant(value));
   }
 
-  // Allocate a MutableHeapNumber with a specific value.
-  TNode<MutableHeapNumber> AllocateMutableHeapNumberWithValue(
-      SloppyTNode<Float64T> value);
-
   // Allocate a BigInt with {length} digits. Sets the sign bit to {false}.
   // Does not initialize the digits.
   TNode<BigInt> AllocateBigInt(TNode<IntPtrT> length);
@@ -1538,12 +1541,12 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   // Allocate a SeqOneByteString with the given length.
   TNode<String> AllocateSeqOneByteString(uint32_t length,
                                          AllocationFlags flags = kNone);
-  TNode<String> AllocateSeqOneByteString(Node* context, TNode<Uint32T> length,
+  TNode<String> AllocateSeqOneByteString(TNode<Uint32T> length,
                                          AllocationFlags flags = kNone);
   // Allocate a SeqTwoByteString with the given length.
   TNode<String> AllocateSeqTwoByteString(uint32_t length,
                                          AllocationFlags flags = kNone);
-  TNode<String> AllocateSeqTwoByteString(Node* context, TNode<Uint32T> length,
+  TNode<String> AllocateSeqTwoByteString(TNode<Uint32T> length,
                                          AllocationFlags flags = kNone);
 
   // Allocate a SlicedOneByteString with the given length, parent and offset.
@@ -1769,7 +1772,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   // array word by word. The source may be destroyed at the end of this macro.
   //
   // Otherwise, specify DestroySource::kNo for operations where an Object is
-  // being cloned, to ensure that MutableHeapNumbers are unique between the
+  // being cloned, to ensure that mutable HeapNumbers are unique between the
   // source and cloned object.
   void CopyPropertyArrayValues(Node* from_array, Node* to_array, Node* length,
                                WriteBarrierMode barrier_mode,
@@ -2190,7 +2193,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<BoolT> IsAccessorInfo(SloppyTNode<HeapObject> object);
   TNode<BoolT> IsAccessorPair(SloppyTNode<HeapObject> object);
   TNode<BoolT> IsAllocationSite(SloppyTNode<HeapObject> object);
-  TNode<BoolT> IsAnyHeapNumber(SloppyTNode<HeapObject> object);
   TNode<BoolT> IsNoElementsProtectorCellInvalid();
   TNode<BoolT> IsArrayIteratorProtectorCellInvalid();
   TNode<BoolT> IsBigIntInstanceType(SloppyTNode<Int32T> instance_type);
@@ -2264,7 +2266,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<BoolT> IsJSPrimitiveWrapperMap(SloppyTNode<Map> map);
   TNode<BoolT> IsJSPrimitiveWrapper(SloppyTNode<HeapObject> object);
   TNode<BoolT> IsMap(SloppyTNode<HeapObject> object);
-  TNode<BoolT> IsMutableHeapNumber(SloppyTNode<HeapObject> object);
   TNode<BoolT> IsName(SloppyTNode<HeapObject> object);
   TNode<BoolT> IsNameInstanceType(SloppyTNode<Int32T> instance_type);
   TNode<BoolT> IsNativeContext(SloppyTNode<HeapObject> object);
@@ -2413,21 +2414,27 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   // Check if |string| is an indirect (thin or flat cons) string type that can
   // be dereferenced by DerefIndirectString.
-  void BranchIfCanDerefIndirectString(Node* string, Node* instance_type,
+  void BranchIfCanDerefIndirectString(TNode<String> string,
+                                      TNode<Int32T> instance_type,
                                       Label* can_deref, Label* cannot_deref);
   // Unpack an indirect (thin or flat cons) string type.
-  void DerefIndirectString(Variable* var_string, Node* instance_type);
+  void DerefIndirectString(TVariable<String>* var_string,
+                           TNode<Int32T> instance_type);
   // Check if |var_string| has an indirect (thin or flat cons) string type,
   // and unpack it if so.
-  void MaybeDerefIndirectString(Variable* var_string, Node* instance_type,
-                                Label* did_deref, Label* cannot_deref);
+  void MaybeDerefIndirectString(TVariable<String>* var_string,
+                                TNode<Int32T> instance_type, Label* did_deref,
+                                Label* cannot_deref);
   // Check if |var_left| or |var_right| has an indirect (thin or flat cons)
   // string type, and unpack it/them if so. Fall through if nothing was done.
-  void MaybeDerefIndirectStrings(Variable* var_left, Node* left_instance_type,
-                                 Variable* var_right, Node* right_instance_type,
+  void MaybeDerefIndirectStrings(TVariable<String>* var_left,
+                                 TNode<Int32T> left_instance_type,
+                                 TVariable<String>* var_right,
+                                 TNode<Int32T> right_instance_type,
                                  Label* did_something);
-  Node* DerefIndirectString(TNode<String> string, TNode<Int32T> instance_type,
-                            Label* cannot_deref);
+  TNode<String> DerefIndirectString(TNode<String> string,
+                                    TNode<Int32T> instance_type,
+                                    Label* cannot_deref);
 
   TNode<String> StringFromSingleUTF16EncodedCodePoint(TNode<Int32T> codepoint);
 
@@ -3371,34 +3378,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   void SetPropertyLength(TNode<Context> context, TNode<Object> array,
                          TNode<Number> length);
 
-  // Checks that {object_map}'s prototype map is the {initial_prototype_map} and
-  // makes sure that the field with name at index {descriptor} is still
-  // constant. If it is not, go to label {if_modified}.
-  //
-  // To make the checks robust, the method also asserts that the descriptor has
-  // the right key, the caller must pass the root index of the key
-  // in {field_name_root_index}.
-  //
-  // This is useful for checking that given function has not been patched
-  // on the prototype.
-  void GotoIfInitialPrototypePropertyModified(TNode<Map> object_map,
-                                              TNode<Map> initial_prototype_map,
-                                              int descfriptor,
-                                              RootIndex field_name_root_index,
-                                              Label* if_modified);
-  struct DescriptorIndexAndName {
-    DescriptorIndexAndName() {}
-    DescriptorIndexAndName(int descriptor_index, RootIndex name_root_index)
-        : descriptor_index(descriptor_index),
-          name_root_index(name_root_index) {}
-
-    int descriptor_index;
-    RootIndex name_root_index;
-  };
-  void GotoIfInitialPrototypePropertiesModified(
-      TNode<Map> object_map, TNode<Map> initial_prototype_map,
-      Vector<DescriptorIndexAndName> properties, Label* if_modified);
-
   // Implements DescriptorArray::Search().
   void DescriptorLookup(SloppyTNode<Name> unique_name,
                         SloppyTNode<DescriptorArray> descriptors,
@@ -3502,7 +3481,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                      Node* receiver, Label* if_bailout,
                                      GetOwnPropertyMode mode = kCallJSGetter);
 
-  TNode<IntPtrT> TryToIntptr(Node* key, Label* miss);
+  TNode<IntPtrT> TryToIntptr(Node* key, Label* miss,
+                             TVariable<Int32T>* var_instance_type = nullptr);
 
   void BranchIfPrototypesHaveNoElements(Node* receiver_map,
                                         Label* definitely_no_elements,
@@ -3513,8 +3493,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   TNode<JSArray> ArrayCreate(TNode<Context> context, TNode<Number> length);
 
-  // Allocate a clone of a mutable primitive, if {object} is a
-  // MutableHeapNumber.
+  // Allocate a clone of a mutable primitive, if {object} is a mutable
+  // HeapNumber.
   TNode<Object> CloneIfMutablePrimitive(TNode<Object> object);
 
  private:
@@ -3554,9 +3534,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<String> AllocateSlicedString(RootIndex map_root_index,
                                      TNode<Uint32T> length,
                                      TNode<String> parent, TNode<Smi> offset);
-
-  // Allocate a MutableHeapNumber without initializing its value.
-  TNode<MutableHeapNumber> AllocateMutableHeapNumber();
 
   Node* SelectImpl(TNode<BoolT> condition, const NodeGenerator& true_body,
                    const NodeGenerator& false_body, MachineRepresentation rep);
@@ -3724,8 +3701,8 @@ class ToDirectStringAssembler : public CodeStubAssembler {
   };
   using Flags = base::Flags<Flag>;
 
-  ToDirectStringAssembler(compiler::CodeAssemblerState* state, Node* string,
-                          Flags flags = Flags());
+  ToDirectStringAssembler(compiler::CodeAssemblerState* state,
+                          TNode<String> string, Flags flags = Flags());
 
   // Converts flat cons, thin, and sliced strings and returns the direct
   // string. The result can be either a sequential or external string.
@@ -3745,22 +3722,57 @@ class ToDirectStringAssembler : public CodeStubAssembler {
     return TryToSequential(PTR_TO_STRING, if_bailout);
   }
 
-  Node* string() { return var_string_.value(); }
-  Node* instance_type() { return var_instance_type_.value(); }
-  TNode<IntPtrT> offset() {
-    return UncheckedCast<IntPtrT>(var_offset_.value());
-  }
-  Node* is_external() { return var_is_external_.value(); }
+  TNode<String> string() { return var_string_.value(); }
+  TNode<Int32T> instance_type() { return var_instance_type_.value(); }
+  TNode<IntPtrT> offset() { return var_offset_.value(); }
+  TNode<Word32T> is_external() { return var_is_external_.value(); }
 
  private:
   TNode<RawPtrT> TryToSequential(StringPointerKind ptr_kind, Label* if_bailout);
 
-  Variable var_string_;
-  Variable var_instance_type_;
-  Variable var_offset_;
-  Variable var_is_external_;
+  TVariable<String> var_string_;
+  TVariable<Int32T> var_instance_type_;
+  TVariable<IntPtrT> var_offset_;
+  TVariable<Word32T> var_is_external_;
 
   const Flags flags_;
+};
+
+// Performs checks on a given prototype (e.g. map identity, property
+// verification), intended for use in fast path checks.
+class PrototypeCheckAssembler : public CodeStubAssembler {
+ public:
+  enum Flag {
+    kCheckPrototypePropertyConstness = 1 << 0,
+    kCheckPrototypePropertyIdentity = 1 << 1,
+    kCheckFull =
+        kCheckPrototypePropertyConstness | kCheckPrototypePropertyIdentity,
+  };
+  using Flags = base::Flags<Flag>;
+
+  // A tuple describing a relevant property. It contains the descriptor index of
+  // the property (within the descriptor array), the property's expected name
+  // (stored as a root), and the property's expected value (stored on the native
+  // context).
+  struct DescriptorIndexNameValue {
+    int descriptor_index;
+    RootIndex name_root_index;
+    int expected_value_context_index;
+  };
+
+  PrototypeCheckAssembler(compiler::CodeAssemblerState* state, Flags flags,
+                          TNode<NativeContext> native_context,
+                          TNode<Map> initial_prototype_map,
+                          Vector<DescriptorIndexNameValue> properties);
+
+  void CheckAndBranch(TNode<HeapObject> prototype, Label* if_unmodified,
+                      Label* if_modified);
+
+ private:
+  const Flags flags_;
+  const TNode<NativeContext> native_context_;
+  const TNode<Map> initial_prototype_map_;
+  const Vector<DescriptorIndexNameValue> properties_;
 };
 
 DEFINE_OPERATORS_FOR_FLAGS(CodeStubAssembler::AllocationFlags)

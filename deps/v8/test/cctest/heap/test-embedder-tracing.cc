@@ -16,6 +16,13 @@
 #include "test/cctest/heap/heap-utils.h"
 
 namespace v8 {
+
+// See test below: TracedGlobalNoDestructor.
+template <>
+struct TracedGlobalTrait<v8::TracedGlobal<v8::Value>> {
+  static constexpr bool kRequiresExplicitDestruction = false;
+};
+
 namespace internal {
 namespace heap {
 
@@ -560,6 +567,68 @@ TEST(TracePrologueCallingIntoV8WriteBarrier) {
                                 std::move(global));
   heap::TemporaryEmbedderHeapTracerScope tracer_scope(isolate, &tracer);
   SimulateIncrementalMarking(CcTest::i_isolate()->heap());
+}
+
+TEST(TracedGlobalWithDestructor) {
+  ManualGCScope manual_gc;
+  CcTest::InitializeVM();
+  v8::Isolate* isolate = CcTest::isolate();
+  v8::HandleScope scope(isolate);
+  TestEmbedderHeapTracer tracer;
+  heap::TemporaryEmbedderHeapTracerScope tracer_scope(isolate, &tracer);
+  i::GlobalHandles* global_handles = CcTest::i_isolate()->global_handles();
+
+  const size_t initial_count = global_handles->handles_count();
+  auto* traced = new v8::TracedGlobal<v8::Object>();
+  {
+    v8::HandleScope scope(isolate);
+    v8::Local<v8::Object> object(ConstructTraceableJSApiObject(
+        isolate->GetCurrentContext(), nullptr, nullptr));
+    CHECK(traced->IsEmpty());
+    *traced = v8::TracedGlobal<v8::Object>(isolate, object);
+    CHECK(!traced->IsEmpty());
+    CHECK_EQ(initial_count + 1, global_handles->handles_count());
+  }
+  static_assert(TracedGlobalTrait<
+                    v8::TracedGlobal<v8::Object>>::kRequiresExplicitDestruction,
+                "destructor expected");
+  delete traced;
+  CHECK_EQ(initial_count, global_handles->handles_count());
+  // GC should not need to clear the handle.
+  heap::InvokeMarkSweep();
+  CHECK_EQ(initial_count, global_handles->handles_count());
+}
+
+TEST(TracedGlobalNoDestructor) {
+  ManualGCScope manual_gc;
+  CcTest::InitializeVM();
+  v8::Isolate* isolate = CcTest::isolate();
+  v8::HandleScope scope(isolate);
+  TestEmbedderHeapTracer tracer;
+  heap::TemporaryEmbedderHeapTracerScope tracer_scope(isolate, &tracer);
+  i::GlobalHandles* global_handles = CcTest::i_isolate()->global_handles();
+
+  const size_t initial_count = global_handles->handles_count();
+  char* memory = new char[sizeof(v8::TracedGlobal<v8::Value>)];
+  auto* traced = new (memory) v8::TracedGlobal<v8::Value>();
+  {
+    v8::HandleScope scope(isolate);
+    v8::Local<v8::Value> object(ConstructTraceableJSApiObject(
+        isolate->GetCurrentContext(), nullptr, nullptr));
+    CHECK(traced->IsEmpty());
+    *traced = v8::TracedGlobal<v8::Value>(isolate, object);
+    CHECK(!traced->IsEmpty());
+    CHECK_EQ(initial_count + 1, global_handles->handles_count());
+  }
+  static_assert(!TracedGlobalTrait<
+                    v8::TracedGlobal<v8::Value>>::kRequiresExplicitDestruction,
+                "no destructor expected");
+  traced->~TracedGlobal<v8::Value>();
+  CHECK_EQ(initial_count + 1, global_handles->handles_count());
+  // GC should clear the handle.
+  heap::InvokeMarkSweep();
+  CHECK_EQ(initial_count, global_handles->handles_count());
+  delete[] memory;
 }
 
 }  // namespace heap

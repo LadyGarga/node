@@ -137,12 +137,11 @@ class V8_EXPORT_PRIVATE InterpreterAssembler : public CodeStubAssembler {
   compiler::Node* LoadConstantPoolEntryAtOperandIndex(int operand_index);
   // Load and untag constant at the index specified in operand |operand_index|
   // from the constant pool.
-  compiler::Node* LoadAndUntagConstantPoolEntryAtOperandIndex(
-      int operand_index);
+  TNode<IntPtrT> LoadAndUntagConstantPoolEntryAtOperandIndex(int operand_index);
   // Load constant at |index| in the constant pool.
   compiler::Node* LoadConstantPoolEntry(compiler::Node* index);
   // Load and untag constant at |index| in the constant pool.
-  compiler::Node* LoadAndUntagConstantPoolEntry(compiler::Node* index);
+  TNode<IntPtrT> LoadAndUntagConstantPoolEntry(compiler::Node* index);
 
   // Load the FeedbackVector for the current function. The retuned node could be
   // undefined.
@@ -427,8 +426,6 @@ class V8_EXPORT_PRIVATE InterpreterAssembler : public CodeStubAssembler {
   bool made_call_;
   bool reloaded_frame_ptr_;
   bool bytecode_array_valid_;
-  bool disable_stack_check_across_call_;
-  compiler::Node* stack_pointer_before_call_;
 
   DISALLOW_COPY_AND_ASSIGN(InterpreterAssembler);
 };

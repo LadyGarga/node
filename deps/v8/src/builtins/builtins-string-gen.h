@@ -19,10 +19,10 @@ class StringBuiltinsAssembler : public CodeStubAssembler {
   Node* GetSubstitution(Node* context, Node* subject_string,
                         Node* match_start_index, Node* match_end_index,
                         Node* replace_string);
-  void StringEqual_Core(Node* context, Node* lhs, Node* lhs_instance_type,
-                        Node* rhs, Node* rhs_instance_type,
-                        TNode<IntPtrT> length, Label* if_equal,
-                        Label* if_not_equal, Label* if_indirect);
+  void StringEqual_Core(Node* lhs, Node* lhs_instance_type, Node* rhs,
+                        Node* rhs_instance_type, TNode<IntPtrT> length,
+                        Label* if_equal, Label* if_not_equal,
+                        Label* if_indirect);
   void BranchIfStringPrimitiveWithNoCustomIteration(TNode<Object> object,
                                                     TNode<Context> context,
                                                     Label* if_true,
@@ -58,16 +58,17 @@ class StringBuiltinsAssembler : public CodeStubAssembler {
   void ConvertAndBoundsCheckStartArgument(Node* context, Variable* var_start,
                                           Node* start, Node* string_length);
 
-  void GenerateStringEqual(Node* context, Node* left, Node* right);
-  void GenerateStringRelationalComparison(Node* context, Node* left,
-                                          Node* right, Operation op);
+  void GenerateStringEqual(TNode<String> left, TNode<String> right);
+  void GenerateStringRelationalComparison(TNode<String> left,
+                                          TNode<String> right, Operation op);
 
   using StringAtAccessor = std::function<TNode<Object>(
       TNode<String> receiver, TNode<IntPtrT> length, TNode<IntPtrT> index)>;
 
-  void StringIndexOf(Node* const subject_string, Node* const search_string,
-                     Node* const position,
-                     const std::function<void(Node*)>& f_return);
+  void StringIndexOf(TNode<String> const subject_string,
+                     TNode<String> const search_string,
+                     TNode<Smi> const position,
+                     const std::function<void(TNode<Smi>)>& f_return);
 
   TNode<Smi> IndexOfDollarChar(Node* const context, Node* const string);
 
@@ -94,12 +95,13 @@ class StringBuiltinsAssembler : public CodeStubAssembler {
   // Important: {regexp_call} may not contain any code that can call into JS.
   using NodeFunction0 = std::function<void()>;
   using NodeFunction1 = std::function<void(Node* fn)>;
-  void MaybeCallFunctionAtSymbol(Node* const context, Node* const object,
-                                 Node* const maybe_string,
-                                 Handle<Symbol> symbol,
-                                 DescriptorIndexAndName symbol_index,
-                                 const NodeFunction0& regexp_call,
-                                 const NodeFunction1& generic_call);
+  using DescriptorIndexNameValue =
+      PrototypeCheckAssembler::DescriptorIndexNameValue;
+  void MaybeCallFunctionAtSymbol(
+      Node* const context, Node* const object, Node* const maybe_string,
+      Handle<Symbol> symbol,
+      DescriptorIndexNameValue additional_property_to_check,
+      const NodeFunction0& regexp_call, const NodeFunction1& generic_call);
 };
 
 class StringIncludesIndexOfAssembler : public StringBuiltinsAssembler {

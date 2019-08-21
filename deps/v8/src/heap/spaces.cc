@@ -1083,8 +1083,7 @@ size_t Page::ShrinkToHighWaterMark() {
     }
     heap()->CreateFillerObjectAt(
         filler.address(),
-        static_cast<int>(area_end() - filler.address() - unused),
-        ClearRecordedSlots::kNo);
+        static_cast<int>(area_end() - filler.address() - unused));
     heap()->memory_allocator()->PartialFreeMemory(
         this, address() + size() - unused, unused, area_end() - unused);
     if (filler.address() != area_end()) {
@@ -1532,10 +1531,6 @@ void MemoryChunk::ReleaseYoungGenerationBitmap() {
 // -----------------------------------------------------------------------------
 // PagedSpace implementation
 
-void Space::CheckOffsetsAreConsistent() const {
-  DCHECK_EQ(Space::kIdOffset, OFFSET_OF(Space, id_));
-}
-
 void Space::AddAllocationObserver(AllocationObserver* observer) {
   allocation_observers_.push_back(observer);
   StartNextInlineAllocationStep();
@@ -1563,7 +1558,7 @@ void Space::AllocationStep(int bytes_since_last, Address soon_object,
 
   DCHECK(!heap()->allocation_step_in_progress());
   heap()->set_allocation_step_in_progress(true);
-  heap()->CreateFillerObjectAt(soon_object, size, ClearRecordedSlots::kNo);
+  heap()->CreateFillerObjectAt(soon_object, size);
   for (AllocationObserver* observer : allocation_observers_) {
     observer->AllocationStep(bytes_since_last, soon_object, size);
   }
@@ -1644,6 +1639,11 @@ void PagedSpace::MergeCompactionSpace(CompactionSpace* other) {
   // Unmerged fields:
   //   area_size_
   other->FreeLinearAllocationArea();
+
+  for (int i = static_cast<int>(AllocationOrigin::kFirstAllocationOrigin);
+       i <= static_cast<int>(AllocationOrigin::kLastAllocationOrigin); i++) {
+    allocations_origins_[i] += other->allocations_origins_[i];
+  }
 
   // The linear allocation area of {other} should be destroyed now.
   DCHECK_EQ(kNullAddress, other->top());
@@ -1846,6 +1846,20 @@ Address SpaceWithLinearArea::ComputeLimit(Address start, Address end,
   }
 }
 
+void SpaceWithLinearArea::UpdateAllocationOrigins(AllocationOrigin origin) {
+  DCHECK(!((origin != AllocationOrigin::kGC) &&
+           (heap()->isolate()->current_vm_state() == GC)));
+  allocations_origins_[static_cast<int>(origin)]++;
+}
+
+void SpaceWithLinearArea::PrintAllocationsOrigins() {
+  PrintIsolate(
+      heap()->isolate(),
+      "Allocations Origins for %s: GeneratedCode:%zu - Runtime:%zu - GC:%zu\n",
+      name(), allocations_origins_[0], allocations_origins_[1],
+      allocations_origins_[2]);
+}
+
 void PagedSpace::MarkLinearAllocationAreaBlack() {
   DCHECK(heap()->incremental_marking()->black_allocation());
   Address current_top = top();
@@ -1976,7 +1990,6 @@ bool PagedSpace::RefillLinearAllocationAreaFromFreeList(size_t size_in_bytes) {
   size_t new_node_size = 0;
   FreeSpace new_node = free_list_->Allocate(size_in_bytes, &new_node_size);
   if (new_node.is_null()) return false;
-
   DCHECK_GE(new_node_size, size_in_bytes);
 
   // The old-space-step might have finished sweeping and restarted marking.
@@ -2277,8 +2290,7 @@ bool SemiSpace::EnsureCurrentCapacity() {
       current_page->SetFlags(first_page()->GetFlags(),
                              static_cast<uintptr_t>(Page::kCopyAllFlags));
       heap()->CreateFillerObjectAt(current_page->area_start(),
-                                   static_cast<int>(current_page->area_size()),
-                                   ClearRecordedSlots::kNo);
+                                   static_cast<int>(current_page->area_size()));
     }
   }
   return true;
@@ -2288,8 +2300,7 @@ LinearAllocationArea LocalAllocationBuffer::Close() {
   if (IsValid()) {
     heap_->CreateFillerObjectAt(
         allocation_info_.top(),
-        static_cast<int>(allocation_info_.limit() - allocation_info_.top()),
-        ClearRecordedSlots::kNo);
+        static_cast<int>(allocation_info_.limit() - allocation_info_.top()));
     const LinearAllocationArea old_info = allocation_info_;
     allocation_info_ = LinearAllocationArea(kNullAddress, kNullAddress);
     return old_info;
@@ -2304,8 +2315,7 @@ LocalAllocationBuffer::LocalAllocationBuffer(
   if (IsValid()) {
     heap_->CreateFillerObjectAt(
         allocation_info_.top(),
-        static_cast<int>(allocation_info_.limit() - allocation_info_.top()),
-        ClearRecordedSlots::kNo);
+        static_cast<int>(allocation_info_.limit() - allocation_info_.top()));
   }
 }
 
@@ -2385,7 +2395,7 @@ bool NewSpace::AddFreshPage() {
   // Clear remainder of current page.
   Address limit = Page::FromAllocationAreaAddress(top)->area_end();
   int remaining_in_page = static_cast<int>(limit - top);
-  heap()->CreateFillerObjectAt(top, remaining_in_page, ClearRecordedSlots::kNo);
+  heap()->CreateFillerObjectAt(top, remaining_in_page);
   UpdateLinearAllocationArea();
 
   return true;
@@ -2897,6 +2907,9 @@ size_t NewSpace::CommittedPhysicalMemory() {
 
 
 void FreeListCategory::Reset() {
+  if (is_linked() && !top().is_null()) {
+    owner()->DecreaseAvailableBytes(available_);
+  }
   set_top(FreeSpace());
   set_prev(nullptr);
   set_next(nullptr);
@@ -2915,8 +2928,7 @@ FreeSpace FreeListCategory::PickNodeFromList(size_t minimum_size,
   }
   set_top(node.next());
   *node_size = node.Size();
-  available_ -= *node_size;
-  length_--;
+  UpdateCountersAfterAllocation(*node_size);
   return node;
 }
 
@@ -2929,8 +2941,7 @@ FreeSpace FreeListCategory::SearchForNodeInList(size_t minimum_size,
     size_t size = cur_node.size();
     if (size >= minimum_size) {
       DCHECK_GE(available_, size);
-      available_ -= size;
-      length_--;
+      UpdateCountersAfterAllocation(size);
       if (cur_node == top()) {
         set_top(cur_node.next());
       }
@@ -2957,8 +2968,12 @@ void FreeListCategory::Free(Address start, size_t size_in_bytes,
   set_top(free_space);
   available_ += size_in_bytes;
   length_++;
-  if ((mode == kLinkCategory) && (prev() == nullptr) && (next() == nullptr)) {
-    owner()->AddCategory(this);
+  if (mode == kLinkCategory) {
+    if (is_linked()) {
+      owner()->IncreaseAvailableBytes(size_in_bytes);
+    } else {
+      owner()->AddCategory(this);
+    }
   }
 }
 
@@ -3211,6 +3226,49 @@ FreeSpace FreeListMany::Allocate(size_t size_in_bytes, size_t* node_size) {
 }
 
 // ------------------------------------------------
+// FreeListMap implementation
+
+FreeListMap::FreeListMap() {
+  // Initializing base (FreeList) fields
+  number_of_categories_ = 1;
+  last_category_ = kOnlyCategory;
+  min_block_size_ = kMinBlockSize;
+  categories_ = new FreeListCategory*[number_of_categories_]();
+
+  Reset();
+}
+
+size_t FreeListMap::GuaranteedAllocatable(size_t maximum_freed) {
+  return maximum_freed;
+}
+
+Page* FreeListMap::GetPageForSize(size_t size_in_bytes) {
+  return GetPageForCategoryType(kOnlyCategory);
+}
+
+FreeListMap::~FreeListMap() { delete[] categories_; }
+
+FreeSpace FreeListMap::Allocate(size_t size_in_bytes, size_t* node_size) {
+  DCHECK_GE(kMaxBlockSize, size_in_bytes);
+
+  // The following DCHECK ensures that maps are allocated one by one (ie,
+  // without folding). This assumption currently holds. However, if it were to
+  // become untrue in the future, you'll get an error here. To fix it, I would
+  // suggest removing the DCHECK, and replacing TryFindNodeIn by
+  // SearchForNodeInList below.
+  DCHECK_EQ(size_in_bytes, Map::kSize);
+
+  FreeSpace node = TryFindNodeIn(kOnlyCategory, size_in_bytes, node_size);
+
+  if (!node.is_null()) {
+    Page::FromHeapObject(node)->IncreaseAllocatedBytes(*node_size);
+  }
+
+  DCHECK_IMPLIES(node.is_null(), IsEmpty());
+  return node;
+}
+
+// ------------------------------------------------
 // Generic FreeList methods (non alloc/free related)
 
 void FreeList::Reset() {
@@ -3220,6 +3278,7 @@ void FreeList::Reset() {
     categories_[i] = nullptr;
   }
   wasted_bytes_ = 0;
+  available_ = 0;
 }
 
 size_t FreeList::EvictFreeListItems(Page* page) {
@@ -3255,7 +3314,7 @@ bool FreeList::AddCategory(FreeListCategory* category) {
   FreeListCategory* top = categories_[type];
 
   if (category->is_empty()) return false;
-  if (top == category) return false;
+  DCHECK_NE(top, category);
 
   // Common double-linked list insertion.
   if (top != nullptr) {
@@ -3263,6 +3322,8 @@ bool FreeList::AddCategory(FreeListCategory* category) {
   }
   category->set_next(top);
   categories_[type] = category;
+
+  IncreaseAvailableBytes(category->available());
   return true;
 }
 
@@ -3270,6 +3331,10 @@ void FreeList::RemoveCategory(FreeListCategory* category) {
   FreeListCategoryType type = category->type_;
   DCHECK_LT(type, number_of_categories_);
   FreeListCategory* top = categories_[type];
+
+  if (category->is_linked()) {
+    DecreaseAvailableBytes(category->available());
+  }
 
   // Common double-linked list removal.
   if (top == category) {
@@ -3462,9 +3527,44 @@ bool PagedSpace::RawSlowRefillLinearAllocationArea(int size_in_bytes) {
 // -----------------------------------------------------------------------------
 // MapSpace implementation
 
+// TODO(dmercadier): use a heap instead of sorting like that.
+// Using a heap will have multiple benefits:
+//   - for now, SortFreeList is only called after sweeping, which is somewhat
+//   late. Using a heap, sorting could be done online: FreeListCategories would
+//   be inserted in a heap (ie, in a sorted manner).
+//   - SortFreeList is a bit fragile: any change to FreeListMap (or to
+//   MapSpace::free_list_) could break it.
+void MapSpace::SortFreeList() {
+  using LiveBytesPagePair = std::pair<size_t, Page*>;
+  std::vector<LiveBytesPagePair> pages;
+  pages.reserve(CountTotalPages());
+
+  for (Page* p : *this) {
+    free_list()->RemoveCategory(p->free_list_category(kFirstCategory));
+    pages.push_back(std::make_pair(p->allocated_bytes(), p));
+  }
+
+  // Sorting by least-allocated-bytes first.
+  std::sort(pages.begin(), pages.end(),
+            [](const LiveBytesPagePair& a, const LiveBytesPagePair& b) {
+              return a.first < b.first;
+            });
+
+  for (LiveBytesPagePair const& p : pages) {
+    // Since AddCategory inserts in head position, it reverts the order produced
+    // by the sort above: least-allocated-bytes will be Added first, and will
+    // therefore be the last element (and the first one will be
+    // most-allocated-bytes).
+    free_list()->AddCategory(p.second->free_list_category(kFirstCategory));
+  }
+}
+
 #ifdef VERIFY_HEAP
 void MapSpace::VerifyObject(HeapObject object) { CHECK(object.IsMap()); }
 #endif
+
+// -----------------------------------------------------------------------------
+// ReadOnlySpace implementation
 
 ReadOnlySpace::ReadOnlySpace(Heap* heap)
     : PagedSpace(heap, RO_SPACE, NOT_EXECUTABLE, FreeList::CreateFreeList()),
@@ -3519,7 +3619,7 @@ void ReadOnlySpace::RepairFreeListsAfterDeserialization() {
       start += filler.Size();
     }
     CHECK_EQ(size, static_cast<int>(end - start));
-    heap()->CreateFillerObjectAt(start, size, ClearRecordedSlots::kNo);
+    heap()->CreateFillerObjectAt(start, size);
   }
 }
 
@@ -3665,8 +3765,7 @@ LargePage* LargeObjectSpace::AllocateLargePage(int object_size,
 
   HeapObject object = page->GetObject();
 
-  heap()->CreateFillerObjectAt(object.address(), object_size,
-                               ClearRecordedSlots::kNo);
+  heap()->CreateFillerObjectAt(object.address(), object_size);
   return page;
 }
 

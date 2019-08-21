@@ -53,9 +53,9 @@ Handle<String> MakeName(const char* str, int suffix) {
   return MakeString(buffer.begin());
 }
 
-int sum9(int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7,
-         int a8) {
-  return a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8;
+int sum10(int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7,
+          int a8, int a9) {
+  return a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9;
 }
 
 static int sum3(int a0, int a1, int a2) { return a0 + a1 + a2; }
@@ -71,7 +71,7 @@ TEST(CallCFunction) {
 
   {
     Node* const fun_constant = m.ExternalConstant(
-        ExternalReference::Create(reinterpret_cast<Address>(sum9)));
+        ExternalReference::Create(reinterpret_cast<Address>(sum10)));
 
     MachineType type_intptr = MachineType::IntPtr();
 
@@ -85,14 +85,15 @@ TEST(CallCFunction) {
                         std::make_pair(type_intptr, m.IntPtrConstant(5)),
                         std::make_pair(type_intptr, m.IntPtrConstant(6)),
                         std::make_pair(type_intptr, m.IntPtrConstant(7)),
-                        std::make_pair(type_intptr, m.IntPtrConstant(8)));
+                        std::make_pair(type_intptr, m.IntPtrConstant(8)),
+                        std::make_pair(type_intptr, m.IntPtrConstant(9)));
     m.Return(m.SmiTag(result));
   }
 
   FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
 
   Handle<Object> result = ft.Call().ToHandleChecked();
-  CHECK_EQ(36, Handle<Smi>::cast(result)->value());
+  CHECK_EQ(45, Handle<Smi>::cast(result)->value());
 }
 
 TEST(CallCFunctionWithCallerSavedRegisters) {
@@ -311,7 +312,7 @@ TEST(DecodeWordFromWord32) {
   CodeAssemblerTester asm_tester(isolate);
   CodeStubAssembler m(asm_tester.state());
 
-  class TestBitField : public BitField<unsigned, 3, 3> {};
+  using TestBitField = BitField<unsigned, 3, 3>;
   m.Return(m.SmiTag(
       m.Signed(m.DecodeWordFromWord32<TestBitField>(m.Int32Constant(0x2F)))));
   FunctionTester ft(asm_tester.GenerateCode());
@@ -438,6 +439,7 @@ TEST(TryToName) {
     {
       Variable var_index(&m, MachineType::PointerRepresentation());
       Variable var_unique(&m, MachineRepresentation::kTagged);
+      Variable var_expected(&m, MachineType::PointerRepresentation());
 
       m.TryToName(key, &if_keyisindex, &var_index, &if_keyisunique, &var_unique,
                   &if_bailout);
@@ -446,8 +448,24 @@ TEST(TryToName) {
       m.GotoIfNot(m.WordEqual(expected_result,
                               m.SmiConstant(Smi::FromInt(kKeyIsIndex))),
                   &failed);
-      m.Branch(m.WordEqual(m.SmiUntag(expected_arg), var_index.value()),
-               &passed, &failed);
+
+      Label if_expectedissmi(&m), if_expectedisheapnumber(&m), check_result(&m);
+      m.Branch(m.TaggedIsSmi(expected_arg), &if_expectedissmi,
+               &if_expectedisheapnumber);
+
+      m.BIND(&if_expectedissmi);
+      var_expected.Bind(m.SmiUntag(expected_arg));
+      m.Goto(&check_result);
+
+      m.BIND(&if_expectedisheapnumber);
+      CSA_ASSERT(&m, m.IsHeapNumber(expected_arg));
+      TNode<Float64T> value = m.LoadHeapNumberValue(expected_arg);
+      var_expected.Bind(m.ChangeFloat64ToUintPtr(value));
+      m.Goto(&check_result);
+
+      m.BIND(&check_result);
+      m.Branch(m.IntPtrEqual(var_expected.value(), var_index.value()), &passed,
+               &failed);
 
       m.BIND(&if_keyisunique);
       m.GotoIfNot(m.WordEqual(expected_result,
@@ -549,10 +567,12 @@ TEST(TryToName) {
   }
 
   {
-    // TryToName(<internalized uncacheable number string>) => bailout
+    // TryToName(<internalized uncacheable number string>) => is_keyisindex:
+    // number.
     Handle<Object> key =
         isolate->factory()->InternalizeUtf8String("4294967294");
-    ft.CheckTrue(key, expect_bailout);
+    Handle<Object> index = isolate->factory()->NewNumber(4294967294);
+    ft.CheckTrue(key, expect_index, index);
   }
 
   {
@@ -567,10 +587,11 @@ TEST(TryToName) {
   }
 
   {
-    // TryToName(<number string without cached index>) => bailout.
+    // TryToName(<number string without cached index>) => is_keyisindex: number.
     Handle<String> key = isolate->factory()->NewStringFromAsciiChecked("153");
     CHECK(!key->HasHashCode());
-    ft.CheckTrue(key, expect_bailout);
+    Handle<Object> index(Smi::FromInt(153), isolate);
+    ft.CheckTrue(key, expect_index, index);
   }
 
   {

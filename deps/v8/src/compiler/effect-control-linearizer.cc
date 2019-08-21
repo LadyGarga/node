@@ -239,6 +239,7 @@ class EffectControlLinearizer {
   Node* ChangeSmiToInt32(Node* value);
   Node* ChangeSmiToInt64(Node* value);
   Node* ObjectIsSmi(Node* value);
+  Node* CompressedObjectIsSmi(Node* value);
   Node* LoadFromSeqString(Node* receiver, Node* position, Node* is_one_byte);
 
   Node* SmiMaxValueConstant();
@@ -1711,7 +1712,7 @@ Node* EffectControlLinearizer::LowerChangeCompressedToTaggedSigned(Node* node) {
   auto if_not_smi = __ MakeDeferredLabel();
   auto done = __ MakeLabel(MachineRepresentation::kWord32);
 
-  Node* check = ObjectIsSmi(value);
+  Node* check = CompressedObjectIsSmi(value);
   __ GotoIfNot(check, &if_not_smi);
   __ Goto(&done, __ ChangeCompressedSignedToTaggedSigned(value));
 
@@ -1811,7 +1812,7 @@ void EffectControlLinearizer::LowerCheckMaps(Node* node, Node* frame_state) {
       // If map is not deprecated the migration attempt does not make sense.
       Node* bitfield3 =
           __ LoadField(AccessBuilder::ForMapBitField3(), value_map);
-      Node* if_not_deprecated = __ WordEqual(
+      Node* if_not_deprecated = __ Word32Equal(
           __ Word32And(bitfield3,
                        __ Int32Constant(Map::IsDeprecatedBit::kMask)),
           __ Int32Constant(0));
@@ -2840,7 +2841,7 @@ Node* EffectControlLinearizer::LowerCheckedCompressedToTaggedSigned(
   Node* value = node->InputAt(0);
   const CheckParameters& params = CheckParametersOf(node->op());
 
-  Node* check = ObjectIsSmi(value);
+  Node* check = CompressedObjectIsSmi(value);
   __ DeoptimizeIfNot(DeoptimizeReason::kNotASmi, params.feedback(), check,
                      frame_state);
 
@@ -2852,7 +2853,7 @@ Node* EffectControlLinearizer::LowerCheckedCompressedToTaggedPointer(
   Node* value = node->InputAt(0);
   const CheckParameters& params = CheckParametersOf(node->op());
 
-  Node* check = ObjectIsSmi(value);
+  Node* check = CompressedObjectIsSmi(value);
   __ DeoptimizeIf(DeoptimizeReason::kSmi, params.feedback(), check,
                   frame_state);
   return __ ChangeCompressedPointerToTaggedPointer(value);
@@ -3190,9 +3191,14 @@ Node* EffectControlLinearizer::LowerObjectIsSafeInteger(Node* node) {
 
 namespace {
 
-const int64_t kMinusZeroBits = bit_cast<int64_t>(-0.0);
-const int32_t kMinusZeroLoBits = static_cast<int32_t>(kMinusZeroBits);
-const int32_t kMinusZeroHiBits = static_cast<int32_t>(kMinusZeroBits >> 32);
+// There is no (currently) available constexpr version of bit_cast, so we have
+// to make do with constructing the -0.0 bits manually (by setting the sign bit
+// to 1 and everything else to 0).
+// TODO(leszeks): Revisit when upgrading to C++20.
+constexpr int32_t kMinusZeroLoBits = static_cast<int32_t>(0);
+constexpr int32_t kMinusZeroHiBits = static_cast<int32_t>(1) << 31;
+constexpr int64_t kMinusZeroBits =
+    (static_cast<uint64_t>(kMinusZeroHiBits) << 32) | kMinusZeroLoBits;
 
 }  // namespace
 
@@ -4547,6 +4553,11 @@ Node* EffectControlLinearizer::ObjectIsSmi(Node* value) {
                       __ IntPtrConstant(kSmiTag));
 }
 
+Node* EffectControlLinearizer::CompressedObjectIsSmi(Node* value) {
+  return __ Word32Equal(__ Word32And(value, __ Int32Constant(kSmiTagMask)),
+                        __ Int32Constant(kSmiTag));
+}
+
 Node* EffectControlLinearizer::SmiMaxValueConstant() {
   return __ Int32Constant(Smi::kMaxValue);
 }
@@ -4772,8 +4783,8 @@ Node* EffectControlLinearizer::LowerLoadFieldByIndex(Node* node) {
     // The {index} is equal to the negated out of property index plus 1.
     __ Bind(&if_outofobject);
     {
-      Node* properties =
-          __ LoadField(AccessBuilder::ForJSObjectPropertiesOrHash(), object);
+      Node* properties = __ LoadField(
+          AccessBuilder::ForJSObjectPropertiesOrHashKnownPointer(), object);
       Node* offset =
           __ IntAdd(__ WordShl(__ IntSub(zero, index),
                                __ IntPtrConstant(kTaggedSizeLog2 - 1)),
@@ -4786,7 +4797,7 @@ Node* EffectControlLinearizer::LowerLoadFieldByIndex(Node* node) {
   }
 
   // The field is a Double field, either unboxed in the object on 64-bit
-  // architectures, or as MutableHeapNumber.
+  // architectures, or a mutable HeapNumber.
   __ Bind(&if_double);
   {
     auto done_double = __ MakeLabel(MachineRepresentation::kFloat64);
@@ -4815,8 +4826,8 @@ Node* EffectControlLinearizer::LowerLoadFieldByIndex(Node* node) {
 
     __ Bind(&if_outofobject);
     {
-      Node* properties =
-          __ LoadField(AccessBuilder::ForJSObjectPropertiesOrHash(), object);
+      Node* properties = __ LoadField(
+          AccessBuilder::ForJSObjectPropertiesOrHashKnownPointer(), object);
       Node* offset =
           __ IntAdd(__ WordShl(__ IntSub(zero, index),
                                __ IntPtrConstant(kTaggedSizeLog2)),
@@ -5906,9 +5917,15 @@ Node* EffectControlLinearizer::LowerFindOrderedHashMapEntryForInt32Key(
     auto if_match = __ MakeLabel();
     auto if_notmatch = __ MakeLabel();
     auto if_notsmi = __ MakeDeferredLabel();
-    __ GotoIfNot(ObjectIsSmi(candidate_key), &if_notsmi);
-    __ Branch(__ Word32Equal(ChangeSmiToInt32(candidate_key), key), &if_match,
-              &if_notmatch);
+    if (COMPRESS_POINTERS_BOOL) {
+      __ GotoIfNot(CompressedObjectIsSmi(candidate_key), &if_notsmi);
+      __ Branch(__ Word32Equal(ChangeCompressedSmiToInt32(candidate_key), key),
+                &if_match, &if_notmatch);
+    } else {
+      __ GotoIfNot(ObjectIsSmi(candidate_key), &if_notsmi);
+      __ Branch(__ Word32Equal(ChangeSmiToInt32(candidate_key), key), &if_match,
+                &if_notmatch);
+    }
 
     __ Bind(&if_notsmi);
     __ GotoIfNot(

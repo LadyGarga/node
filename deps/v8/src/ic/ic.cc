@@ -400,10 +400,8 @@ MaybeHandle<Object> LoadIC::Load(Handle<Object> object, Handle<Name> name) {
 
   if (MigrateDeprecated(isolate(), object)) use_ic = false;
 
-  if (state() != UNINITIALIZED) {
-    JSObject::MakePrototypesFast(object, kStartAtReceiver, isolate());
-    update_receiver_map(object);
-  }
+  JSObject::MakePrototypesFast(object, kStartAtReceiver, isolate());
+  update_receiver_map(object);
 
   LookupIterator it(isolate(), object, name);
 
@@ -618,7 +616,7 @@ void IC::PatchCache(Handle<Name> name, const MaybeObjectHandle& handler) {
   DCHECK(IsAnyLoad() || IsAnyStore() || IsAnyHas());
   switch (state()) {
     case NO_FEEDBACK:
-      break;
+      UNREACHABLE();
     case UNINITIALIZED:
     case PREMONOMORPHIC:
       UpdateMonomorphicIC(handler, name);
@@ -648,15 +646,6 @@ void IC::PatchCache(Handle<Name> name, const MaybeObjectHandle& handler) {
 }
 
 void LoadIC::UpdateCaches(LookupIterator* lookup) {
-  if (state() == UNINITIALIZED && !IsLoadGlobalIC()) {
-    // This is the first time we execute this inline cache. Set the target to
-    // the pre monomorphic stub to delay setting the monomorphic state.
-    TRACE_HANDLER_STATS(isolate(), LoadIC_Premonomorphic);
-    ConfigureVectorState(receiver_map());
-    TraceIC("LoadIC", lookup->name());
-    return;
-  }
-
   Handle<Object> code;
   if (lookup->state() == LookupIterator::ACCESS_CHECK) {
     code = slow_stub();
@@ -1158,29 +1147,26 @@ void KeyedLoadIC::LoadElementPolymorphicHandlers(
 namespace {
 
 bool ConvertKeyToIndex(Handle<Object> receiver, Handle<Object> key,
-                       uint32_t* index, InlineCacheState state) {
-  if (!FLAG_use_ic || state == NO_FEEDBACK) return false;
-  if (receiver->IsAccessCheckNeeded() || receiver->IsJSPrimitiveWrapper()) {
-    return false;
-  }
+                       uint32_t* index) {
+  if (!receiver->IsJSReceiver()) return false;
+  if (key->ToArrayIndex(index)) return true;
 
-  // For regular JSReceiver or String receivers, the {key} must be a positive
-  // array index.
-  if (receiver->IsJSReceiver() || receiver->IsString()) {
-    if (key->ToArrayIndex(index)) return true;
-  }
+  if (!receiver->IsJSTypedArray()) return false;
+
   // For JSTypedArray receivers, we can also support negative keys, which we
   // just map into the [2**31, 2**32 - 1] range via a bit_cast. This is valid
   // because JSTypedArray::length is always a Smi, so such keys will always
   // be detected as OOB.
-  if (receiver->IsJSTypedArray()) {
-    int32_t signed_index;
-    if (key->ToInt32(&signed_index)) {
-      *index = bit_cast<uint32_t>(signed_index);
-      return true;
-    }
-  }
-  return false;
+  int32_t signed_index;
+  if (!key->ToInt32(&signed_index)) return false;
+  *index = bit_cast<uint32_t>(signed_index);
+  return true;
+}
+
+bool CanCache(Handle<Object> receiver, InlineCacheState state) {
+  if (!FLAG_use_ic || state == NO_FEEDBACK) return false;
+  if (!receiver->IsJSReceiver()) return false;
+  return !receiver->IsAccessCheckNeeded() && !receiver->IsJSPrimitiveWrapper();
 }
 
 bool IsOutOfBoundsAccess(Handle<Object> receiver, uint32_t index) {
@@ -1244,13 +1230,18 @@ MaybeHandle<Object> KeyedLoadIC::Load(Handle<Object> object,
   key = TryConvertKey(key, isolate());
 
   uint32_t index;
-  if ((key->IsInternalizedString() &&
-       !String::cast(*key).AsArrayIndex(&index)) ||
+  bool already_found_index = false;
+  if (key->IsInternalizedString()) {
+    already_found_index = String::cast(*key).AsArrayIndex(&index);
+  }
+
+  if ((key->IsInternalizedString() && !already_found_index) ||
       key->IsSymbol()) {
     ASSIGN_RETURN_ON_EXCEPTION(isolate(), load_handle,
                                LoadIC::Load(object, Handle<Name>::cast(key)),
                                Object);
-  } else if (ConvertKeyToIndex(object, key, &index, state())) {
+  } else if (CanCache(object, state()) &&
+             (already_found_index || ConvertKeyToIndex(object, key, &index))) {
     KeyedAccessLoadMode load_mode = GetLoadMode(isolate(), object, index);
     UpdateLoadElement(Handle<HeapObject>::cast(object), load_mode);
     if (is_vector_set()) {
@@ -1415,9 +1406,7 @@ MaybeHandle<Object> StoreIC::Store(Handle<Object> object, Handle<Name> name,
     return TypeError(MessageTemplate::kNonObjectPropertyStore, object, name);
   }
 
-  if (state() != UNINITIALIZED) {
-    JSObject::MakePrototypesFast(object, kStartAtPrototype, isolate());
-  }
+  JSObject::MakePrototypesFast(object, kStartAtPrototype, isolate());
   LookupIterator it(isolate(), object, name);
 
   if (name->IsPrivate()) {
@@ -1442,15 +1431,6 @@ MaybeHandle<Object> StoreIC::Store(Handle<Object> object, Handle<Name> name,
 
 void StoreIC::UpdateCaches(LookupIterator* lookup, Handle<Object> value,
                            StoreOrigin store_origin) {
-  if (state() == UNINITIALIZED && !IsStoreGlobalIC()) {
-    // This is the first time we execute this inline cache. Transition
-    // to premonomorphic state to delay setting the monomorphic state.
-    TRACE_HANDLER_STATS(isolate(), StoreIC_Premonomorphic);
-    ConfigureVectorState(receiver_map());
-    TraceIC("StoreIC", lookup->name());
-    return;
-  }
-
   MaybeObjectHandle handler;
   if (LookupForWrite(lookup, value, store_origin)) {
     if (IsStoreGlobalIC()) {
@@ -1810,10 +1790,8 @@ void KeyedStoreIC::UpdateStoreElement(Handle<Map> receiver_map,
   handlers.reserve(target_receiver_maps.size());
   StoreElementPolymorphicHandlers(&target_receiver_maps, &handlers, store_mode);
   if (target_receiver_maps.size() == 0) {
-    // Transition to PREMONOMORPHIC state here and remember a weak-reference
-    // to the {receiver_map} in case TurboFan sees this function before the
-    // IC can transition further.
-    ConfigureVectorState(receiver_map);
+    Handle<Object> handler = StoreElementHandler(receiver_map, store_mode);
+    ConfigureVectorState(Handle<Name>(), receiver_map, handler);
   } else if (target_receiver_maps.size() == 1) {
     ConfigureVectorState(Handle<Name>(), target_receiver_maps[0], handlers[0]);
   } else {
